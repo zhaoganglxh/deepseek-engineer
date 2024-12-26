@@ -1,4 +1,4 @@
-# Deep Seek Engineer 🐋
+# DeepSeek Engineer 🐋
 
 ## Overview
 
