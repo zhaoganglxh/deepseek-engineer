@@ -147,6 +147,26 @@ def try_handle_add_command(user_input: str) -> bool:
         return True
     return False
 
+# Add this new helper function after read_local_file function
+def ensure_file_in_context(file_path: str) -> bool:
+    """
+    Ensures the file content is in the conversation context.
+    Returns True if successful, False if file not found.
+    """
+    try:
+        content = read_local_file(file_path)
+        # Check if this file is already in context
+        file_marker = f"Content of file '{file_path}'"
+        if not any(file_marker in msg["content"] for msg in conversation_history):
+            conversation_history.append({
+                "role": "system",
+                "content": f"{file_marker}:\n\n{content}"
+            })
+        return True
+    except OSError:
+        console.print(f"[red]✗[/red] Could not read file '[cyan]{file_path}[/cyan]' for editing context", style="red")
+        return False
+
 # --------------------------------------------------------------------------------
 # 5. Conversation state
 # --------------------------------------------------------------------------------
@@ -163,6 +183,12 @@ def stream_openai_response(user_message: str):
     Streams the DeepSeek chat completion response and handles structured output.
     Returns the final AssistantResponse.
     """
+    # First, check if the user message contains a file path they want to edit
+    potential_paths = [word for word in user_message.split() if '/' in word]
+    for path in potential_paths:
+        # Try to ensure any mentioned files are in context before proceeding
+        ensure_file_in_context(path)
+
     conversation_history.append({"role": "user", "content": user_message})
 
     full_content = ""
@@ -170,7 +196,7 @@ def stream_openai_response(user_message: str):
     try:
         # Start streaming with response_format set for JSON
         stream = client.chat.completions.create(
-            model="deepseek-chat",  # DeepSeek chat model
+            model="deepseek-chat",
             messages=conversation_history,
             response_format={"type": "json_object"},
             stream=True
@@ -187,9 +213,26 @@ def stream_openai_response(user_message: str):
 
         console.print()  # End the streaming line
 
-        # Parse the complete response
         try:
             parsed_response = json.loads(full_content)
+            
+            # Double-check files_to_edit paths are in context
+            if "files_to_edit" in parsed_response and parsed_response["files_to_edit"]:
+                files_to_check = [edit["path"] for edit in parsed_response["files_to_edit"]]
+                
+                # Add files to context if needed
+                all_files_valid = True
+                for file_path in files_to_check:
+                    if not ensure_file_in_context(file_path):
+                        all_files_valid = False
+                
+                # If any files couldn't be read, abort the edit
+                if not all_files_valid:
+                    parsed_response["files_to_edit"] = None
+                    parsed_response["assistant_reply"] = "Error: Could not access one or more files for editing. Please make sure the files exist and are accessible."
+                    # Retry the request with updated context
+                    return stream_openai_response(user_message)
+
             # Add a default assistant_reply if missing
             if "assistant_reply" not in parsed_response:
                 parsed_response["assistant_reply"] = "Processing file changes..."
