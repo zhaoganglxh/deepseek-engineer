@@ -190,6 +190,10 @@ def stream_openai_response(user_message: str):
         # Parse the complete response
         try:
             parsed_response = json.loads(full_content)
+            # Add a default assistant_reply if missing
+            if "assistant_reply" not in parsed_response:
+                parsed_response["assistant_reply"] = "Processing file changes..."
+            
             response_obj = AssistantResponse(**parsed_response)
 
             # Save the assistant's reply to conversation history
