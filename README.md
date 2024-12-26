@@ -55,7 +55,7 @@ This repository contains a powerful coding assistant application that integrates
    ### Using uv (faster alternative)
    ```bash
    uv venv
-   uv pip install -r requirements.txt
+
    uv run main.py
    ```
 
