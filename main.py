@@ -125,10 +125,18 @@ def create_file(path: str, content: str):
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(content)
     console.print(f"[green]✓[/green] Created/updated file at '[cyan]{file_path}[/cyan]'")
-    # NEW: also record it so the assistant sees it in context
+    
+    # Record the action
     conversation_history.append({
         "role": "assistant",
         "content": f"✓ Created/updated file at '{file_path}'"
+    })
+    
+    # NEW: Add the actual content to conversation context
+    normalized_path = normalize_path(str(file_path))
+    conversation_history.append({
+        "role": "system",
+        "content": f"Content of file '{normalized_path}':\n\n{content}"
     })
 
 # NEW: Show the user a table of proposed edits and confirm
@@ -154,15 +162,19 @@ def apply_diff_edit(path: str, original_snippet: str, new_snippet: str):
         content = read_local_file(path)
         if original_snippet in content:
             updated_content = content.replace(original_snippet, new_snippet, 1)
-            create_file(path, updated_content)
+            create_file(path, updated_content)  # This will now also update conversation context
             console.print(f"[green]✓[/green] Applied diff edit to '[cyan]{path}[/cyan]'")
-            # NEW: also record it in conversation so the assistant sees it
             conversation_history.append({
                 "role": "assistant",
                 "content": f"✓ Applied diff edit to '{path}'"
             })
         else:
+            # NEW: Add debug info about the mismatch
             console.print(f"[yellow]⚠[/yellow] Original snippet not found in '[cyan]{path}[/cyan]'. No changes made.", style="yellow")
+            console.print("\nExpected snippet:", style="yellow")
+            console.print(Panel(original_snippet, title="Expected", border_style="yellow"))
+            console.print("\nActual file content:", style="yellow")
+            console.print(Panel(content, title="Actual", border_style="yellow"))
     except FileNotFoundError:
         console.print(f"[red]✗[/red] File not found for diff editing: '[cyan]{path}[/cyan]'", style="red")
 
@@ -192,8 +204,9 @@ def ensure_file_in_context(file_path: str) -> bool:
     Returns True if successful, False if file not found.
     """
     try:
-        content = read_local_file(file_path)
-        file_marker = f"Content of file '{file_path}'"
+        normalized_path = normalize_path(file_path)
+        content = read_local_file(normalized_path)
+        file_marker = f"Content of file '{normalized_path}'"
         if not any(file_marker in msg["content"] for msg in conversation_history):
             conversation_history.append({
                 "role": "system",
@@ -203,6 +216,10 @@ def ensure_file_in_context(file_path: str) -> bool:
     except OSError:
         console.print(f"[red]✗[/red] Could not read file '[cyan]{file_path}[/cyan]' for editing context", style="red")
         return False
+
+def normalize_path(path_str: str) -> str:
+    """Return a canonical, absolute version of the path."""
+    return str(Path(path_str).resolve())
 
 # --------------------------------------------------------------------------------
 # 5. Conversation state
@@ -218,17 +235,18 @@ conversation_history = [
 def guess_files_in_message(user_message: str) -> List[str]:
     """
     Attempt to guess which files the user might be referencing.
-    We'll gather words that either have a slash, or typical file extensions
-    like .css, .html, .js, etc.
-    This is just a naive approach for demonstration.
+    Returns normalized absolute paths.
     """
     recognized_extensions = [".css", ".html", ".js", ".py", ".json", ".md"]
     potential_paths = []
     for word in user_message.split():
-        # If the user typed something like "transformers-website/style.css"
-        # or just "style.css", we consider it a potential path reference
         if any(ext in word for ext in recognized_extensions) or "/" in word:
-            potential_paths.append(word.strip("',\""))
+            path = word.strip("',\"")
+            try:
+                normalized_path = normalize_path(path)
+                potential_paths.append(normalized_path)
+            except (OSError, ValueError):
+                continue
     return potential_paths
 
 def stream_openai_response(user_message: str):
@@ -245,7 +263,7 @@ def stream_openai_response(user_message: str):
     for path in potential_paths:
         try:
             content = read_local_file(path)
-            valid_files[path] = content
+            valid_files[path] = content  # path is already normalized
             file_marker = f"Content of file '{path}'"
             # Add to conversation if we haven't already
             if not any(file_marker in msg["content"] for msg in conversation_history):
@@ -254,23 +272,9 @@ def stream_openai_response(user_message: str):
                     "content": f"{file_marker}:\n\n{content}"
                 })
         except OSError:
-            # If file truly doesn't exist, we'll inform the user and return
             error_msg = f"Cannot proceed: File '{path}' does not exist or is not accessible"
             console.print(f"[red]✗[/red] {error_msg}", style="red")
-            return AssistantResponse(
-                assistant_reply=error_msg,
-                files_to_create=[],
-                files_to_edit=[]
-            )
-
-    # (Removed the block that prompted the user to add a file if "edit" was detected with no valid file.)
-
-    # Add file validation status to the conversation
-    if valid_files:
-        conversation_history.append({
-            "role": "system",
-            "content": "Available files for editing:\n" + "\n".join(valid_files.keys())
-        })
+            continue
 
     # Now proceed with the API call
     conversation_history.append({"role": "user", "content": user_message})
@@ -304,10 +308,18 @@ def stream_openai_response(user_message: str):
 
             # If assistant tries to edit files not in valid_files, remove them
             if "files_to_edit" in parsed_response and parsed_response["files_to_edit"]:
-                parsed_response["files_to_edit"] = [
-                    edit for edit in parsed_response["files_to_edit"]
-                    if edit["path"] in valid_files
-                ]
+                new_files_to_edit = []
+                for edit in parsed_response["files_to_edit"]:
+                    try:
+                        edit_abs_path = normalize_path(edit["path"])
+                        # If we have the file in context or can read it now
+                        if edit_abs_path in valid_files or ensure_file_in_context(edit_abs_path):
+                            edit["path"] = edit_abs_path  # Use normalized path
+                            new_files_to_edit.append(edit)
+                    except (OSError, ValueError):
+                        console.print(f"[yellow]⚠[/yellow] Skipping invalid path: '{edit['path']}'", style="yellow")
+                        continue
+                parsed_response["files_to_edit"] = new_files_to_edit
 
             response_obj = AssistantResponse(**parsed_response)
 
