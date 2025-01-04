@@ -22,7 +22,7 @@ console = Console()
 # --------------------------------------------------------------------------------
 load_dotenv()  # Load environment variables from .env file
 client = OpenAI(
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
+    api_key=os.getenv("DEEPSEEK_API_KEY"), #sk-36f1e4fd00844220a6cebde72bb87afd
     base_url="https://api.deepseek.com"
 )  # Configure for DeepSeek API
 
